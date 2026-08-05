@@ -15,3 +15,7 @@
 # IDE local state
 .metadata/
 .settings/language.settings.xml
+
+# Python
+__pycache__/
+*.pyc
