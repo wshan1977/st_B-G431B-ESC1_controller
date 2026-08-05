@@ -11,6 +11,7 @@ import telemetry_monitor as tm
 
 def main():
     app = tm.MonitorApp()
+    app.attributes("-topmost", True)  # 다른 창에 가려 스크린샷이 오염되지 않게
     app.radius_var.set("100")       # 브레이크력이 0~20gf 범위에 들어오도록
     app.chart.selected = "brk"      # 좌축을 브레이크력으로 두고 검증
     t0 = time.time()
@@ -25,6 +26,8 @@ def main():
         ibus_ma = max(iq_ma // 4, -800)
         app.rx_queue.put(("data", (t, rpm, iph_ma, iq_ma, ibus_ma, 12)))
         n[0] += 1
+        if n[0] == 25:
+            app._calibrate_brake()  # 0점 보정 경로 검증
         if n[0] < 50:
             app.after(100, inject)
         else:

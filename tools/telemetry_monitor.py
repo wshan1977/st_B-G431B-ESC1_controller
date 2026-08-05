@@ -6,7 +6,9 @@
 RPM / 전류 / 토크 / 브레이크력 / 버스전압을 실시간 표시하고 그래프로 그린다.
 
 토크는 전기 입력 전력과 회전수로부터 T = P / ω = (Vbus x Ibus) / (RPM x 2π/60)
-로 환산하고, 브레이크력은 입력한 작용 반경으로 F = T / r 환산한다.
+로 환산하고, 브레이크력은 입력한 작용 반경으로 F = (T - 0점 오프셋) / r 환산한다.
+P/ω는 마찰·철손 등 무부하 손실까지 토크로 잡으므로, 무부하 회전 상태에서
+[캘리브레이션] 버튼을 눌러 그 시점의 토크를 0점으로 저장해 차감한다.
 Ibus(버스전류)가 음수이면 제동(회생), 양수이면 구동 상태다.
 저속(|RPM| < 100)에서는 나눗셈이 발산하므로 표시하지 않는다.
 
@@ -241,6 +243,9 @@ class MonitorApp(tk.Tk):
 
         self.reader = None
         self.rx_queue = queue.Queue()
+        # 브레이크 0점 보정: 무부하 손실 토크(P/ω가 마찰·철손까지 잡음)를 빼는 오프셋
+        self.brk_offset_mnm = 0.0
+        self._last_trq_mnm = None
 
         self._build_toolbar()
         self._build_readouts()
@@ -286,8 +291,29 @@ class MonitorApp(tk.Tk):
             frame.columnconfigure(col, weight=1)
             var = tk.StringVar(value="--")
             tk.Label(box, textvariable=var, font=("Consolas", 20, "bold"),
-                     fg=color).pack(padx=8, pady=2)
+                     fg=color).pack(side="left", expand=True, padx=8, pady=2)
             self.values[name] = var
+            if name == "브레이크력":
+                btns = ttk.Frame(box)
+                btns.pack(side="right", padx=4)
+                ttk.Button(btns, text="캘리브레이션", width=11,
+                           command=self._calibrate_brake).pack(pady=1)
+                ttk.Button(btns, text="보정 해제", width=11,
+                           command=self._clear_brake_cal).pack(pady=1)
+
+    def _calibrate_brake(self):
+        """현재(무부하) 토크를 0점으로 저장 — 이후 브레이크력에서 차감."""
+        if self._last_trq_mnm is None:
+            self.status.set("캘리브레이션 실패 — 토크 값이 아직 수신되지 않았습니다.")
+            return
+        self.brk_offset_mnm = self._last_trq_mnm
+        self.status.set(
+            f"브레이크 0점 보정 적용: 오프셋 {self.brk_offset_mnm:+.1f} mN·m "
+            "(무부하 상태에서 누르세요)")
+
+    def _clear_brake_cal(self):
+        self.brk_offset_mnm = 0.0
+        self.status.set("브레이크 0점 보정 해제됨")
 
     def _radius_mm(self):
         try:
@@ -350,16 +376,20 @@ class MonitorApp(tk.Tk):
                         omega = rpm * 2 * math.pi / 60          # rad/s
                         power_w = vbus * ibus_ma / 1000          # W
                         torque_mnm = 1000 * power_w / omega
-                        mode = "제동" if torque_mnm < 0 else "구동"
+                        self._last_trq_mnm = torque_mnm
                         self.values["토크"].set(f"{torque_mnm:+.1f}")
                         r = self._radius_mm()
                         if r is not None:
+                            # 0점 보정(무부하 손실 토크) 차감 후 힘으로 환산.
                             # mN·m == N·mm 이므로 F[N] = T[mN·m]/r[mm]
-                            force_gf = torque_mnm / r * GF_PER_N
+                            trq_corr = torque_mnm - self.brk_offset_mnm
+                            mode = "제동" if trq_corr < 0 else "구동"
+                            force_gf = trq_corr / r * GF_PER_N
                             self.values["브레이크력"].set(f"{force_gf:+.0f} {mode}")
                         else:
                             self.values["브레이크력"].set("반경?")
                     else:
+                        self._last_trq_mnm = None
                         self.values["토크"].set("--")
                         self.values["브레이크력"].set("--")
 
