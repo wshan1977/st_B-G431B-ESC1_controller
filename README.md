@@ -83,13 +83,6 @@ ElectronicSpeedControl_ESC-G4/
 └── STM32CubeIDE/         # IDE 프로젝트 (빌드 산출물은 git 제외)
 ```
 
-## 알려진 문제
-
-- `beep_pwm_restore()`가 비프 종료 후 CCR2/CCR3를 0으로 리셋하지 않아,
-  자동 시작 전까지(~1.7초) V/W상 하이사이드가 100% ON 되어 권선에 큰 전류가
-  흐를 수 있습니다. 채널 재활성화 전에 `LL_TIM_OC_SetCompareCH1/2/3(TIM1, 0)`
-  호출이 필요합니다 (원본 `esc.c`의 `SM_BEEP_4` 처리 참고).
-
 ## 안전 주의
 
 모터 구동 테스트 시 프로펠러 등 부하를 제거하고, 전류 제한이 가능한

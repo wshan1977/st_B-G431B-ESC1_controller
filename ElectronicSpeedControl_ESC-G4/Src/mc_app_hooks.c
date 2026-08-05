@@ -104,6 +104,13 @@ static void beep_pwm_restore(uint32_t arr)
   LL_TIM_CC_DisableChannel(TIM1, LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH2
                                | LL_TIM_CHANNEL_CH3 | LL_TIM_CHANNEL_CH1N
                                | LL_TIM_CHANNEL_CH2N | LL_TIM_CHANNEL_CH3N);
+  /* Compare values must be zeroed before re-enabling the channels: the beep
+     left CCR2/CCR3 above the restored ARR (high sides 100% on), which would
+     short bus voltage across the windings until the motor starts. CCR=0 keeps
+     all low sides on (brake), same idle state as esc.c SM_BEEP_4. */
+  LL_TIM_OC_SetCompareCH1(TIM1, 0U);
+  LL_TIM_OC_SetCompareCH2(TIM1, 0U);
+  LL_TIM_OC_SetCompareCH3(TIM1, 0U);
   LL_TIM_SetAutoReload(TIM1, arr);
   LL_TIM_CC_EnableChannel(TIM1, LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH2
                               | LL_TIM_CHANNEL_CH3 | LL_TIM_CHANNEL_CH1N
