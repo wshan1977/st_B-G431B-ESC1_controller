@@ -49,11 +49,12 @@ static RegConv_t PotRegConv =
    115200 8N1 set in MX_USART2_UART_Init(). ASPEP/Motor Pilot no longer starts
    (see MCboot), so the telemetry owns the UART.
    One ASCII line every TELEM_PERIOD_TICKS, e.g.:
-     RPM=5010 IPH=1836mA IBUS=250mA VBUS=12V
+     RPM=5010 IPH=1836mA IQ=-1830mA IBUS=250mA VBUS=12V
+   IQ is the signed torque-producing current (negative = braking/generating),
    IBUS is estimated from electrical power / bus voltage (no bus shunt). */
 #define TELEM_PERIOD_TICKS   100U  /* message period in medium-frequency ticks (~100 ms) */
 
-static char telem_buf[64];
+static char telem_buf[80];
 static uint8_t telem_len = 0U;
 static uint8_t telem_pos = 0U;
 
@@ -271,13 +272,16 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         int32_t rpm = ((int32_t)MC_GetMecSpeedAverageMotor1() * U_RPM) / SPEED_UNIT;
         int32_t iph_mA = (int32_t)((float)MC_GetPhaseCurrentAmplitudeMotor1()
                                    * S16A_TO_AMP * 1000.0f);
+        qd_t iqd = MC_GetIqdMotor1();
+        int32_t iq_mA = (int32_t)((float)iqd.q * S16A_TO_AMP * 1000.0f);
         uint16_t vbus_V = VBS_GetAvBusVoltage_V(&BusVoltageSensor_M1._Super);
         int32_t power_mW = (int32_t)(MC_GetAveragePowerMotor1_F() * 1000.0f);
         int32_t ibus_mA = (vbus_V > 0U) ? (power_mW / (int32_t)vbus_V) : 0;
 
         int n = snprintf(telem_buf, sizeof(telem_buf),
-                         "RPM=%d IPH=%dmA IBUS=%dmA VBUS=%uV\r\n",
-                         (int)rpm, (int)iph_mA, (int)ibus_mA, (unsigned int)vbus_V);
+                         "RPM=%d IPH=%dmA IQ=%dmA IBUS=%dmA VBUS=%uV\r\n",
+                         (int)rpm, (int)iph_mA, (int)iq_mA, (int)ibus_mA,
+                         (unsigned int)vbus_V);
         if (n > 0)
         {
           telem_len = ((size_t)n < sizeof(telem_buf)) ? (uint8_t)n
