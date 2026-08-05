@@ -74,24 +74,36 @@ class SerialReader(threading.Thread):
 
 
 class StripChart(tk.Canvas):
-    """RPM(좌축, 0부터)과 부호 있는 토크(우축, ±대칭)를 함께 그리는 스트립 차트.
+    """여러 신호를 한 그래프에 합쳐 그리는 스트립 차트.
 
-    토크는 0 기준선을 중심으로 구동(양수)은 녹색, 제동(음수)은 빨간색으로
-    구간별 색을 바꿔 그린다.
+    상단 범례를 클릭해 신호를 켜고 끌 수 있다. 각 신호는 자기 최대값으로
+    독립 스케일링해 겹쳐 그리고, 현재 스케일은 범례에 표시한다.
+    토크는 0 기준선(점선) 중심의 ±대칭 스케일로, 구동(양수)은 녹색,
+    제동(음수)은 빨간색으로 구간별 색을 바꿔 그린다.
     """
 
-    PAD_L, PAD_R, PAD_T, PAD_B = 56, 64, 10, 22
-    RPM_COLOR = "#1f77b4"
+    PAD_L, PAD_R, PAD_T, PAD_B = 8, 8, 30, 22
     DRIVE_COLOR, BRAKE_COLOR = "#2ca02c", "#d62728"
+    # key, 라벨, 색, 단위, 부호(±대칭) 여부, 최소 스케일
+    SERIES = (
+        ("rpm",  "RPM",     "#1f77b4", "rpm",  False, 1000),
+        ("trq",  "토크",     "#2ca02c", "mN·m", True,  10),
+        ("iph",  "상전류",   "#ff7f0e", "A",    False, 1),
+        ("ibus", "버스전류", "#8c564b", "A",    False, 1),
+        ("vbus", "버스전압", "#7f7f7f", "V",    False, 15),
+    )
 
     def __init__(self, master, **kw):
         super().__init__(master, bg="white", highlightthickness=1,
                          highlightbackground="#cccccc", **kw)
-        self.samples = []  # (t, rpm, torque_mNm signed)
+        self.samples = []  # dict: t, rpm, trq, iph, ibus, vbus
+        self.visible = {"rpm", "trq"}
         self.bind("<Configure>", lambda e: self.redraw())
+        self.bind("<Button-1>", self._on_click)
+        self._legend_boxes = []  # (x_min, x_max, y_min, y_max, key)
 
-    def add(self, t, rpm, torque):
-        self.samples.append((t, rpm, torque))
+    def add(self, sample: dict):
+        self.samples.append(sample)
         if len(self.samples) > MAX_POINTS:
             del self.samples[: len(self.samples) - MAX_POINTS]
         self.redraw()
@@ -99,6 +111,16 @@ class StripChart(tk.Canvas):
     def clear(self):
         self.samples = []
         self.redraw()
+
+    def _on_click(self, event):
+        for xa, xb, ya, yb, key in self._legend_boxes:
+            if xa <= event.x <= xb and ya <= event.y <= yb:
+                if key in self.visible:
+                    self.visible.discard(key)
+                else:
+                    self.visible.add(key)
+                self.redraw()
+                return
 
     @staticmethod
     def _nice_max(value, minimum):
@@ -114,50 +136,70 @@ class StripChart(tk.Canvas):
         if x1 <= x0 or y1 <= y0:
             return
 
-        rpm_max = self._nice_max(max((s[1] for s in self.samples), default=0), 1000)
-        trq_lim = self._nice_max(max((abs(s[2]) for s in self.samples), default=0), 10)
+        # 신호별 자동 스케일 계산
+        scales = {}
+        for key, _label, _color, _unit, signed, min_scale in self.SERIES:
+            vals = [abs(s[key]) for s in self.samples if s.get(key) is not None]
+            scales[key] = self._nice_max(max(vals, default=0), min_scale)
 
+        # 클릭 가능한 범례 (켜짐: ■ 색상, 꺼짐: 회색 취소선)
+        self._legend_boxes = []
+        lx = x0 + 4
+        for key, label, color, unit, _signed, _min in self.SERIES:
+            on = key in self.visible
+            text = f"■ {label} (≤{scales[key]:g}{unit})"
+            item = self.create_text(
+                lx, self.PAD_T / 2, anchor="w",
+                fill=(color if on else "#bbbbbb"),
+                text=text, font=("TkDefaultFont", 9, "bold" if on else "overstrike"))
+            xa, ya, xb, yb = self.bbox(item)
+            self._legend_boxes.append((xa, xb, ya, yb, key))
+            lx = xb + 14
+
+        # 격자
         for i in range(5):
             y = y0 + (y1 - y0) * i / 4
             self.create_line(x0, y, x1, y, fill="#eeeeee")
-            self.create_text(x0 - 6, y, anchor="e", fill=self.RPM_COLOR,
-                             text=f"{int(rpm_max * (4 - i) / 4)}", font=("TkDefaultFont", 8))
-            trq_tick = trq_lim * (2 - i) / 2  # +lim .. 0 .. -lim
-            self.create_text(x1 + 6, y, anchor="w",
-                             fill=self.BRAKE_COLOR if trq_tick < 0 else self.DRIVE_COLOR,
-                             text=f"{trq_tick:+.0f}" if trq_tick else "0",
-                             font=("TkDefaultFont", 8))
         y_mid = (y0 + y1) / 2
-        self.create_line(x0, y_mid, x1, y_mid, fill="#999999", dash=(4, 3))
+        if "trq" in self.visible:
+            self.create_line(x0, y_mid, x1, y_mid, fill="#999999", dash=(4, 3))
         self.create_text((x0 + x1) / 2, h - 6, fill="#888888",
-                         text=f"최근 {HISTORY_SEC}초   (좌: RPM, 우: 토크 mN·m — 녹=구동, 적=제동)",
+                         text=f"최근 {HISTORY_SEC}초 — 범례를 클릭하면 신호를 켜고 끕니다"
+                              " (토크: 녹=구동, 적=제동)",
                          font=("TkDefaultFont", 8))
         self.create_rectangle(x0, y0, x1, y1, outline="#bbbbbb")
 
         if len(self.samples) < 2:
             return
-        t_end = self.samples[-1][0]
+        t_end = self.samples[-1]["t"]
         t_start = t_end - HISTORY_SEC
 
         def to_x(t):
             return x0 + (x1 - x0) * (t - t_start) / HISTORY_SEC
 
-        # RPM: 0 기준 좌축
-        pts = [(to_x(s[0]), y1 - (y1 - y0) * min(s[1] / rpm_max, 1.0))
-               for s in self.samples if s[0] >= t_start]
-        if len(pts) >= 2:
-            self.create_line(*[c for p in pts for c in p],
-                             fill=self.RPM_COLOR, width=2)
-
-        # 토크: 0 기준선 중심의 ±대칭 우축, 부호에 따라 색 분리
         half = (y1 - y0) / 2
-        tpts = [(to_x(s[0]),
-                 y_mid - half * max(min(s[2] / trq_lim, 1.0), -1.0),
-                 s[2])
-                for s in self.samples if s[0] >= t_start]
-        for (xa, ya, va), (xb, yb, vb) in zip(tpts, tpts[1:]):
-            color = self.BRAKE_COLOR if (va + vb) / 2 < 0 else self.DRIVE_COLOR
-            self.create_line(xa, ya, xb, yb, fill=color, width=2)
+        for key, _label, color, _unit, signed, _min in self.SERIES:
+            if key not in self.visible:
+                continue
+            vmax = scales[key]
+            pts = []
+            for s in self.samples:
+                if s["t"] < t_start or s.get(key) is None:
+                    continue
+                v = s[key]
+                if signed:
+                    y = y_mid - half * max(min(v / vmax, 1.0), -1.0)
+                else:
+                    y = y1 - (y1 - y0) * min(max(v, 0) / vmax, 1.0)
+                pts.append((to_x(s["t"]), y, v))
+            if len(pts) < 2:
+                continue
+            if signed:  # 토크: 부호에 따라 녹/적 구간 분리
+                for (xa, ya, va), (xb, yb, vb) in zip(pts, pts[1:]):
+                    seg = self.BRAKE_COLOR if (va + vb) / 2 < 0 else self.DRIVE_COLOR
+                    self.create_line(xa, ya, xb, yb, fill=seg, width=2)
+            else:
+                self.create_line(*[c for p in pts for c in p], fill=color, width=2)
 
 
 class MonitorApp(tk.Tk):
@@ -287,7 +329,12 @@ class MonitorApp(tk.Tk):
                         self.values["토크"].set("--")
                         self.values["브레이크력"].set("--")
 
-                    self.chart.add(t, rpm, torque_mnm if torque_mnm is not None else 0)
+                    self.chart.add({
+                        "t": t, "rpm": rpm,
+                        "trq": torque_mnm if torque_mnm is not None else 0,
+                        "iph": iph_ma / 1000, "ibus": ibus_ma / 1000,
+                        "vbus": vbus,
+                    })
                     self.status.set(
                         f"수신 중 — RPM={rpm} IPH={iph_ma}mA IQ={iq_ma}mA "
                         f"IBUS={ibus_ma}mA VBUS={vbus}V")
