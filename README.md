@@ -14,14 +14,15 @@ PWM 입력 대신 **전원 인가 후 자동 시작 + 포텐셔미터 속도 제
 | 전류 측정 | 3-션트 + 내장 OPAMP1/2/3, ADC1/ADC2 injected 변환 |
 | 과전류 보호 | COMP1/2/4 + DAC3 기준전압 → TIM1 브레이크 입력 |
 | 속도 명령 | PB12 (ADC1_IN11) 포텐셔미터 |
-| 텔레메트리 | PB6 = USART1 TX, 115200 8N1 (Hall 커넥터 핀 재활용) |
+| 텔레메트리 | USART2 → ST-LINK 가상 COM 포트 (보드 USB), 115200 8N1 |
 
 ## 제어 방식
 
 - **센서리스 FOC** — B-EMF 관측기(STO-PLL) + 오픈루프 리브업(rev-up) 시동
 - PWM 20 kHz, TIM1 센터얼라인, FOC 루프는 PWM 주기마다 실행
 - 속도 루프(Medium Frequency Task) 1 kHz, 속도 PID 제어 (`MCM_SPEED_MODE`)
-- USART2(1.84 Mbps, MCP/ASPEP 프로토콜)로 **ST Motor Pilot** 모니터링/제어 가능
+- USART2는 ASCII 텔레메트리 전용 (Motor Pilot/ASPEP는 비활성화,
+  `mc_tasks.c`의 `ASPEP_start` 주석 해제 + 보드레이트 1.84 Mbps 복원으로 되돌릴 수 있음)
 
 ## 동작 방법
 
@@ -36,7 +37,9 @@ PWM 입력 대신 **전원 인가 후 자동 시작 + 포텐셔미터 속도 제
 
 ### UART 텔레메트리
 
-PB6(USART1 TX, 115200 8N1)으로 100 ms마다 한 줄씩 ASCII 텔레메트리를 출력합니다.
+보드 USB(ST-LINK 가상 COM 포트 = USART2, 115200 8N1)로 100 ms마다 한 줄씩
+ASCII 텔레메트리를 출력합니다. USB 케이블만 꽂고 PC에서 시리얼 터미널을
+열면 바로 보입니다.
 
 ```
 RPM=5010 IPH=1836mA IBUS=250mA VBUS=12V
@@ -47,9 +50,9 @@ RPM=5010 IPH=1836mA IBUS=250mA VBUS=12V
 - `IBUS` — 소비전류 추정치 (전기적 출력 전력 ÷ 버스전압, 전용 션트 없음)
 - `VBUS` — DC 버스전압
 
-센서리스 구동이라 Hall 커넥터의 PB6 핀이 비어 있어 이를 사용하며,
-USART2는 Motor Pilot용으로 그대로 유지됩니다. 송신은 Medium Frequency Task에서
-TX FIFO를 논블로킹으로 채우는 방식이라 모터 제어에 영향을 주지 않습니다.
+USART2를 텔레메트리가 점유하므로 Motor Pilot(ASPEP)은 비활성화 상태입니다.
+송신은 Medium Frequency Task에서 TX FIFO를 논블로킹으로 채우는 방식이라
+모터 제어에 영향을 주지 않습니다.
 
 원본 예제의 RC PWM 입력 처리(`esc_boot` / `esc_pwm_control`)는 주석 처리되어
 사용하지 않습니다. 주요 튜닝 파라미터는 `mc_app_hooks.c` 상단의

@@ -96,7 +96,7 @@ __weak void MCboot( MCI_Handle_t* pMCIList[NBR_OF_MOTORS] )
     pMCIList[M1] = &Mci[M1];
     FOC_Init();
 
-    ASPEP_start(&aspepOverUartA);
+    /* ASPEP_start(&aspepOverUartA); */ /* Motor Pilot disabled: USART2 is used for ASCII telemetry (mc_app_hooks.c) */
     /* USER CODE BEGIN MCboot 1 */
 
     /* USER CODE END MCboot 1 */

@@ -45,13 +45,13 @@ static RegConv_t PotRegConv =
   .samplingTime = LL_ADC_SAMPLINGTIME_47CYCLES_5,
 };
 
-/* Telemetry on USART1 TX = PB6 (AF7), 115200 8N1. PB6 belongs to the unused
-   Hall-sensor connector (sensorless drive), USART2 stays free for Motor Pilot.
+/* Telemetry on USART2 (PB3/PB4 = ST-LINK virtual COM port over the board USB),
+   115200 8N1 set in MX_USART2_UART_Init(). ASPEP/Motor Pilot no longer starts
+   (see MCboot), so the telemetry owns the UART.
    One ASCII line every TELEM_PERIOD_TICKS, e.g.:
      RPM=5010 IPH=1836mA IBUS=250mA VBUS=12V
    IBUS is estimated from electrical power / bus voltage (no bus shunt). */
 #define TELEM_PERIOD_TICKS   100U  /* message period in medium-frequency ticks (~100 ms) */
-#define TELEM_BAUDRATE       115200U
 
 static char telem_buf[64];
 static uint8_t telem_len = 0U;
@@ -63,21 +63,11 @@ static const float S16A_TO_AMP = 3.3f / (65536.0f * RSHUNT * AMPLIFICATION_GAIN)
 
 static void telem_uart_init(void)
 {
-  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
-  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
-
-  LL_GPIO_SetPinSpeed(GPIOB, LL_GPIO_PIN_6, LL_GPIO_SPEED_FREQ_HIGH);
-  LL_GPIO_SetPinOutputType(GPIOB, LL_GPIO_PIN_6, LL_GPIO_OUTPUT_PUSHPULL);
-  LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_6, LL_GPIO_PULL_UP);
-  LL_GPIO_SetAFPin_0_7(GPIOB, LL_GPIO_PIN_6, LL_GPIO_AF_7);
-  LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_6, LL_GPIO_MODE_ALTERNATE);
-
-  /* USART1 kernel clock is PCLK2 = SystemCoreClock (APB2 prescaler is DIV1) */
-  LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
-  LL_USART_SetBaudRate(USART1, SystemCoreClock, LL_USART_PRESCALER_DIV1,
-                       LL_USART_OVERSAMPLING_16, TELEM_BAUDRATE);
-  LL_USART_EnableFIFO(USART1);
-  LL_USART_Enable(USART1);
+  /* USART2 is already configured by MX_USART2_UART_Init(); only the TX FIFO is
+     enabled here (requires UE=0) so the sender can burst several bytes per tick. */
+  LL_USART_Disable(USART2);
+  LL_USART_EnableFIFO(USART2);
+  LL_USART_Enable(USART2);
 }
 
 /* Power-on "beep-beep": drives the motor windings as a speaker, same technique
@@ -266,9 +256,9 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
   {
     static uint16_t telem_tick = 0U;
 
-    while ((telem_pos < telem_len) && (0U != LL_USART_IsActiveFlag_TXE_TXFNF(USART1)))
+    while ((telem_pos < telem_len) && (0U != LL_USART_IsActiveFlag_TXE_TXFNF(USART2)))
     {
-      LL_USART_TransmitData8(USART1, (uint8_t)telem_buf[telem_pos]);
+      LL_USART_TransmitData8(USART2, (uint8_t)telem_buf[telem_pos]);
       telem_pos++;
     }
 
