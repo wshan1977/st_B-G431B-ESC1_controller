@@ -74,19 +74,24 @@ class SerialReader(threading.Thread):
 
 
 class StripChart(tk.Canvas):
-    """RPM(좌축)과 |토크|(우축)를 함께 그리는 스트립 차트."""
+    """RPM(좌축, 0부터)과 부호 있는 토크(우축, ±대칭)를 함께 그리는 스트립 차트.
+
+    토크는 0 기준선을 중심으로 구동(양수)은 녹색, 제동(음수)은 빨간색으로
+    구간별 색을 바꿔 그린다.
+    """
 
     PAD_L, PAD_R, PAD_T, PAD_B = 56, 64, 10, 22
-    RPM_COLOR, TRQ_COLOR = "#1f77b4", "#d62728"
+    RPM_COLOR = "#1f77b4"
+    DRIVE_COLOR, BRAKE_COLOR = "#2ca02c", "#d62728"
 
     def __init__(self, master, **kw):
         super().__init__(master, bg="white", highlightthickness=1,
                          highlightbackground="#cccccc", **kw)
-        self.samples = []  # (t, rpm, torque_mNm_abs)
+        self.samples = []  # (t, rpm, torque_mNm signed)
         self.bind("<Configure>", lambda e: self.redraw())
 
-    def add(self, t, rpm, torque_abs):
-        self.samples.append((t, rpm, torque_abs))
+    def add(self, t, rpm, torque):
+        self.samples.append((t, rpm, torque))
         if len(self.samples) > MAX_POINTS:
             del self.samples[: len(self.samples) - MAX_POINTS]
         self.redraw()
@@ -110,17 +115,22 @@ class StripChart(tk.Canvas):
             return
 
         rpm_max = self._nice_max(max((s[1] for s in self.samples), default=0), 1000)
-        trq_max = self._nice_max(max((s[2] for s in self.samples), default=0), 10)
+        trq_lim = self._nice_max(max((abs(s[2]) for s in self.samples), default=0), 10)
 
         for i in range(5):
             y = y0 + (y1 - y0) * i / 4
             self.create_line(x0, y, x1, y, fill="#eeeeee")
             self.create_text(x0 - 6, y, anchor="e", fill=self.RPM_COLOR,
                              text=f"{int(rpm_max * (4 - i) / 4)}", font=("TkDefaultFont", 8))
-            self.create_text(x1 + 6, y, anchor="w", fill=self.TRQ_COLOR,
-                             text=f"{trq_max * (4 - i) / 4:.0f}", font=("TkDefaultFont", 8))
+            trq_tick = trq_lim * (2 - i) / 2  # +lim .. 0 .. -lim
+            self.create_text(x1 + 6, y, anchor="w",
+                             fill=self.BRAKE_COLOR if trq_tick < 0 else self.DRIVE_COLOR,
+                             text=f"{trq_tick:+.0f}" if trq_tick else "0",
+                             font=("TkDefaultFont", 8))
+        y_mid = (y0 + y1) / 2
+        self.create_line(x0, y_mid, x1, y_mid, fill="#999999", dash=(4, 3))
         self.create_text((x0 + x1) / 2, h - 6, fill="#888888",
-                         text=f"최근 {HISTORY_SEC}초   (좌: RPM, 우: |토크| mN·m)",
+                         text=f"최근 {HISTORY_SEC}초   (좌: RPM, 우: 토크 mN·m — 녹=구동, 적=제동)",
                          font=("TkDefaultFont", 8))
         self.create_rectangle(x0, y0, x1, y1, outline="#bbbbbb")
 
@@ -129,16 +139,25 @@ class StripChart(tk.Canvas):
         t_end = self.samples[-1][0]
         t_start = t_end - HISTORY_SEC
 
-        def to_xy(t, val, vmax):
-            x = x0 + (x1 - x0) * (t - t_start) / HISTORY_SEC
-            y = y1 - (y1 - y0) * min(val / vmax, 1.0)
-            return x, y
+        def to_x(t):
+            return x0 + (x1 - x0) * (t - t_start) / HISTORY_SEC
 
-        for idx, color, vmax in ((1, self.RPM_COLOR, rpm_max),
-                                 (2, self.TRQ_COLOR, trq_max)):
-            pts = [to_xy(s[0], s[idx], vmax) for s in self.samples if s[0] >= t_start]
-            if len(pts) >= 2:
-                self.create_line(*[c for p in pts for c in p], fill=color, width=2)
+        # RPM: 0 기준 좌축
+        pts = [(to_x(s[0]), y1 - (y1 - y0) * min(s[1] / rpm_max, 1.0))
+               for s in self.samples if s[0] >= t_start]
+        if len(pts) >= 2:
+            self.create_line(*[c for p in pts for c in p],
+                             fill=self.RPM_COLOR, width=2)
+
+        # 토크: 0 기준선 중심의 ±대칭 우축, 부호에 따라 색 분리
+        half = (y1 - y0) / 2
+        tpts = [(to_x(s[0]),
+                 y_mid - half * max(min(s[2] / trq_lim, 1.0), -1.0),
+                 s[2])
+                for s in self.samples if s[0] >= t_start]
+        for (xa, ya, va), (xb, yb, vb) in zip(tpts, tpts[1:]):
+            color = self.BRAKE_COLOR if (va + vb) / 2 < 0 else self.DRIVE_COLOR
+            self.create_line(xa, ya, xb, yb, fill=color, width=2)
 
 
 class MonitorApp(tk.Tk):
@@ -268,7 +287,7 @@ class MonitorApp(tk.Tk):
                         self.values["토크"].set("--")
                         self.values["브레이크력"].set("--")
 
-                    self.chart.add(t, rpm, abs(torque_mnm) if torque_mnm else 0)
+                    self.chart.add(t, rpm, torque_mnm if torque_mnm is not None else 0)
                     self.status.set(
                         f"수신 중 — RPM={rpm} IPH={iph_ma}mA IQ={iq_ma}mA "
                         f"IBUS={ibus_ma}mA VBUS={vbus}V")
