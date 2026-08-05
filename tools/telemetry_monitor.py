@@ -86,18 +86,19 @@ class StripChart(tk.Canvas):
     DRIVE_COLOR, BRAKE_COLOR = "#2ca02c", "#d62728"
     # key, 라벨, 색, 단위, 부호(±대칭) 여부, 최소 스케일
     SERIES = (
-        ("rpm",  "RPM",     "#1f77b4", "rpm",  False, 1000),
-        ("trq",  "토크",     "#2ca02c", "mN·m", True,  10),
-        ("iph",  "상전류",   "#ff7f0e", "A",    False, 1),
-        ("ibus", "버스전류", "#8c564b", "A",    False, 1),
-        ("vbus", "버스전압", "#7f7f7f", "V",    False, 15),
+        ("rpm",  "RPM",      "#1f77b4", "rpm",  False, 1000),
+        ("trq",  "토크",      "#2ca02c", "mN·m", True,  10),
+        ("brk",  "브레이크력", "#9467bd", "gf",   True,  50),
+        ("iph",  "상전류",    "#ff7f0e", "A",    False, 1),
+        ("ibus", "버스전류",  "#8c564b", "A",    False, 1),
+        ("vbus", "버스전압",  "#7f7f7f", "V",    False, 15),
     )
 
     def __init__(self, master, **kw):
         super().__init__(master, bg="white", highlightthickness=1,
                          highlightbackground="#cccccc", **kw)
         self.samples = []  # dict: t, rpm, trq, iph, ibus, vbus
-        self.visible = {"rpm", "trq"}
+        self.visible = {"rpm", "trq", "brk"}
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self._on_click)
         self._legend_boxes = []  # (x_min, x_max, y_min, y_max, key)
@@ -161,7 +162,7 @@ class StripChart(tk.Canvas):
             y = y0 + (y1 - y0) * i / 4
             self.create_line(x0, y, x1, y, fill="#eeeeee")
         y_mid = (y0 + y1) / 2
-        if "trq" in self.visible:
+        if self.visible & {"trq", "brk"}:
             self.create_line(x0, y_mid, x1, y_mid, fill="#999999", dash=(4, 3))
         self.create_text((x0 + x1) / 2, h - 6, fill="#888888",
                          text=f"최근 {HISTORY_SEC}초 — 범례를 클릭하면 신호를 켜고 끕니다"
@@ -194,12 +195,13 @@ class StripChart(tk.Canvas):
                 pts.append((to_x(s["t"]), y, v))
             if len(pts) < 2:
                 continue
-            if signed:  # 토크: 부호에 따라 녹/적 구간 분리
+            if key == "trq":  # 토크: 부호에 따라 녹/적 구간 분리
                 for (xa, ya, va), (xb, yb, vb) in zip(pts, pts[1:]):
                     seg = self.BRAKE_COLOR if (va + vb) / 2 < 0 else self.DRIVE_COLOR
                     self.create_line(xa, ya, xb, yb, fill=seg, width=2)
             else:
-                self.create_line(*[c for p in pts for c in p], fill=color, width=2)
+                self.create_line(*[c for p in pts for c in (p[0], p[1])],
+                                 fill=color, width=2)
 
 
 class MonitorApp(tk.Tk):
@@ -314,6 +316,7 @@ class MonitorApp(tk.Tk):
                     self.values["버스전압"].set(f"{vbus}")
 
                     torque_mnm = None
+                    force_gf = None
                     if iq_ma is not None:
                         torque_mnm = KT_MNM_PER_A * iq_ma / 1000
                         mode = "제동" if torque_mnm < 0 else "구동"
@@ -332,6 +335,7 @@ class MonitorApp(tk.Tk):
                     self.chart.add({
                         "t": t, "rpm": rpm,
                         "trq": torque_mnm if torque_mnm is not None else 0,
+                        "brk": force_gf,
                         "iph": iph_ma / 1000, "ibus": ibus_ma / 1000,
                         "vbus": vbus,
                     })
