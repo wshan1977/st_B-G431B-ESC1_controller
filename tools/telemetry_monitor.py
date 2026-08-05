@@ -5,9 +5,10 @@
 "RPM=5010 IPH=1836mA IQ=-1830mA IBUS=250mA VBUS=12V" 형식의 라인을 파싱해
 RPM / 전류 / 토크 / 브레이크력 / 버스전압을 실시간 표시하고 그래프로 그린다.
 
-토크는 모터 상수(0.82 Vrms ph-ph/kRPM, pmsm_motor_parameters.h)로부터
-T = Kt x Iq 로 환산하고, 브레이크력은 입력한 작용 반경으로 F = T / r 환산한다.
-Iq(토크 전류)가 음수이면 제동(브레이크), 양수이면 구동 상태다.
+토크는 전기 입력 전력과 회전수로부터 T = P / ω = (Vbus x Ibus) / (RPM x 2π/60)
+로 환산하고, 브레이크력은 입력한 작용 반경으로 F = T / r 환산한다.
+Ibus(버스전류)가 음수이면 제동(회생), 양수이면 구동 상태다.
+저속(|RPM| < 100)에서는 나눗셈이 발산하므로 표시하지 않는다.
 
 의존성: pyserial  (pip install pyserial)
 실행:   python telemetry_monitor.py
@@ -32,12 +33,7 @@ HISTORY_SEC = 60          # 그래프에 유지할 시간 범위
 SAMPLE_PERIOD = 0.1       # 펌웨어 전송 주기 (100 ms)
 MAX_POINTS = int(HISTORY_SEC / SAMPLE_PERIOD)
 
-# 토크 상수 [mN·m / A(peak)] — 역기전력 상수 0.82 Vrms(선간)/kRPM 에서 유도:
-#   p·λ = 0.82 / 104.72(rad/s per kRPM) / √3(선간→상) × √2(rms→피크)
-#   Kt  = 1.5 × p·λ  →  약 9.59 mN·m/A
-KE_VRMS_LL_PER_KRPM = 0.82
-KT_MNM_PER_A = 1.5 * (KE_VRMS_LL_PER_KRPM / (1000 * 2 * math.pi / 60)
-                      / math.sqrt(3) * math.sqrt(2)) * 1000
+MIN_RPM_FOR_TORQUE = 100  # 이 미만에서는 T = P/ω 계산이 발산하므로 표시 안 함
 DEFAULT_RADIUS_MM = 30.0  # 브레이크력 환산용 작용 반경 기본값
 GF_PER_N = 1000 / 9.80665
 
@@ -315,10 +311,13 @@ class MonitorApp(tk.Tk):
                     self.values["버스전류"].set(f"{ibus_ma / 1000:.2f}")
                     self.values["버스전압"].set(f"{vbus}")
 
+                    # T = P/ω : 전기 입력 전력(Vbus x Ibus)을 기계 각속도로 나눔
                     torque_mnm = None
                     force_gf = None
-                    if iq_ma is not None:
-                        torque_mnm = KT_MNM_PER_A * iq_ma / 1000
+                    if abs(rpm) >= MIN_RPM_FOR_TORQUE:
+                        omega = rpm * 2 * math.pi / 60          # rad/s
+                        power_w = vbus * ibus_ma / 1000          # W
+                        torque_mnm = 1000 * power_w / omega
                         mode = "제동" if torque_mnm < 0 else "구동"
                         self.values["토크"].set(f"{torque_mnm:+.1f}")
                         r = self._radius_mm()
@@ -334,7 +333,7 @@ class MonitorApp(tk.Tk):
 
                     self.chart.add({
                         "t": t, "rpm": rpm,
-                        "trq": torque_mnm if torque_mnm is not None else 0,
+                        "trq": torque_mnm,
                         "brk": force_gf,
                         "iph": iph_ma / 1000, "ibus": ibus_ma / 1000,
                         "vbus": vbus,
