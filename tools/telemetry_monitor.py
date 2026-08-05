@@ -70,16 +70,16 @@ class SerialReader(threading.Thread):
 
 
 class StripChart(tk.Canvas):
-    """여러 신호를 한 그래프에 합쳐 그리는 스트립 차트.
+    """RPM(우축, 항상 표시)과 선택한 비교 신호(좌축) 두 개를 겹쳐 그리는 차트.
 
-    상단 범례를 클릭해 신호를 켜고 끌 수 있다. 각 신호는 자기 최대값으로
-    독립 스케일링해 겹쳐 그리고, 현재 스케일은 범례에 표시한다.
-    토크는 0 기준선(점선) 중심의 ±대칭 스케일로, 구동(양수)은 녹색,
-    제동(음수)은 빨간색으로 구간별 색을 바꿔 그린다.
+    상단 범례에서 RPM 외 신호 하나를 클릭해 선택하면 좌측 Y축에 그 신호의
+    눈금이 표시된다. 토크/브레이크력은 0 기준선(점선) 중심의 ±대칭 스케일로,
+    구동(양수)은 녹색, 제동(음수)은 빨간색으로 구간별 색을 바꿔 그린다.
     """
 
-    PAD_L, PAD_R, PAD_T, PAD_B = 8, 8, 30, 22
+    PAD_L, PAD_R, PAD_T, PAD_B = 62, 62, 30, 22
     DRIVE_COLOR, BRAKE_COLOR = "#2ca02c", "#d62728"
+    RPM_COLOR = "#1f77b4"
     # key, 라벨, 색, 단위, 부호(±대칭) 여부, 최소 스케일
     SERIES = (
         ("rpm",  "RPM",      "#1f77b4", "rpm",  False, 1000),
@@ -93,8 +93,8 @@ class StripChart(tk.Canvas):
     def __init__(self, master, **kw):
         super().__init__(master, bg="white", highlightthickness=1,
                          highlightbackground="#cccccc", **kw)
-        self.samples = []  # dict: t, rpm, trq, iph, ibus, vbus
-        self.visible = {"rpm", "trq", "brk"}
+        self.samples = []  # dict: t, rpm, trq, brk, iph, ibus, vbus
+        self.selected = "trq"  # 좌축에 표시할 비교 신호 (RPM은 우축 고정)
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self._on_click)
         self._legend_boxes = []  # (x_min, x_max, y_min, y_max, key)
@@ -112,12 +112,13 @@ class StripChart(tk.Canvas):
     def _on_click(self, event):
         for xa, xb, ya, yb, key in self._legend_boxes:
             if xa <= event.x <= xb and ya <= event.y <= yb:
-                if key in self.visible:
-                    self.visible.discard(key)
-                else:
-                    self.visible.add(key)
-                self.redraw()
+                if key != "rpm":  # RPM은 항상 표시, 선택 대상 아님
+                    self.selected = key
+                    self.redraw()
                 return
+
+    def _series_def(self, key):
+        return next(s for s in self.SERIES if s[0] == key)
 
     @staticmethod
     def _nice_max(value, minimum):
@@ -139,30 +140,48 @@ class StripChart(tk.Canvas):
             vals = [abs(s[key]) for s in self.samples if s.get(key) is not None]
             scales[key] = self._nice_max(max(vals, default=0), min_scale)
 
-        # 클릭 가능한 범례 (켜짐: ■ 색상, 꺼짐: 회색 취소선)
+        sel = self.selected
+        _, sel_label, sel_color, sel_unit, sel_signed, _ = self._series_def(sel)
+
+        # 범례: RPM은 항상 켜짐(고정), 나머지 5개 중 클릭한 하나만 선택
         self._legend_boxes = []
         lx = x0 + 4
         for key, label, color, unit, _signed, _min in self.SERIES:
-            on = key in self.visible
+            on = (key == "rpm") or (key == sel)
             text = f"■ {label} (≤{scales[key]:g}{unit})"
+            if key == "rpm":
+                text += " [우축]"
+            elif key == sel:
+                text += " [좌축]"
             item = self.create_text(
                 lx, self.PAD_T / 2, anchor="w",
                 fill=(color if on else "#bbbbbb"),
-                text=text, font=("TkDefaultFont", 9, "bold" if on else "overstrike"))
+                text=text, font=("TkDefaultFont", 9, "bold" if on else "normal"))
             xa, ya, xb, yb = self.bbox(item)
             self._legend_boxes.append((xa, xb, ya, yb, key))
             lx = xb + 14
 
-        # 격자
+        # 격자 + 양쪽 축 눈금 (좌: 선택 신호, 우: RPM)
         for i in range(5):
             y = y0 + (y1 - y0) * i / 4
             self.create_line(x0, y, x1, y, fill="#eeeeee")
+            if sel_signed:
+                tick = scales[sel] * (2 - i) / 2   # +max .. 0 .. -max
+                tick_txt = f"{tick:+g}" if tick else "0"
+            else:
+                tick = scales[sel] * (4 - i) / 4   # max .. 0
+                tick_txt = f"{tick:g}"
+            self.create_text(x0 - 6, y, anchor="e", fill=sel_color,
+                             text=tick_txt, font=("TkDefaultFont", 8))
+            self.create_text(x1 + 6, y, anchor="w", fill=self.RPM_COLOR,
+                             text=f"{int(scales['rpm'] * (4 - i) / 4)}",
+                             font=("TkDefaultFont", 8))
         y_mid = (y0 + y1) / 2
-        if self.visible & {"trq", "brk"}:
+        if sel_signed:
             self.create_line(x0, y_mid, x1, y_mid, fill="#999999", dash=(4, 3))
         self.create_text((x0 + x1) / 2, h - 6, fill="#888888",
-                         text=f"최근 {HISTORY_SEC}초 — 범례를 클릭하면 신호를 켜고 끕니다"
-                              " (토크: 녹=구동, 적=제동)",
+                         text=f"최근 {HISTORY_SEC}초 — 좌축: {sel_label}({sel_unit}), "
+                              f"우축: RPM. 범례를 클릭해 좌축 신호를 선택하세요",
                          font=("TkDefaultFont", 8))
         self.create_rectangle(x0, y0, x1, y1, outline="#bbbbbb")
 
@@ -175,9 +194,8 @@ class StripChart(tk.Canvas):
             return x0 + (x1 - x0) * (t - t_start) / HISTORY_SEC
 
         half = (y1 - y0) / 2
-        for key, _label, color, _unit, signed, _min in self.SERIES:
-            if key not in self.visible:
-                continue
+        for key in ("rpm", sel):
+            _, _label, color, _unit, signed, _min = self._series_def(key)
             vmax = scales[key]
             pts = []
             for s in self.samples:
