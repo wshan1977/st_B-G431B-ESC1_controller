@@ -1,0 +1,17 @@
+# STM32CubeIDE build output
+**/STM32CubeIDE/Debug/
+**/STM32CubeIDE/Release/
+
+# Object / binary artifacts
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.su
+
+# IDE local state
+.metadata/
+.settings/language.settings.xml
