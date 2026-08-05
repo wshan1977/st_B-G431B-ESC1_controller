@@ -21,11 +21,13 @@
   */
 
 /* Includes ------------------------------------------------------------------*/
+#include <stdio.h>
 #include "mc_type.h"
 #include "mc_app_hooks.h"
 #include "mc_config.h"
 #include "mc_api.h"
 #include "drive_parameters.h"
+#include "power_stage_parameters.h"
 #include "regular_conversion_manager.h"
 #include "esc.h"
 
@@ -42,6 +44,41 @@ static RegConv_t PotRegConv =
   .channel      = MC_ADC_CHANNEL_11,
   .samplingTime = LL_ADC_SAMPLINGTIME_47CYCLES_5,
 };
+
+/* Telemetry on USART1 TX = PB6 (AF7), 115200 8N1. PB6 belongs to the unused
+   Hall-sensor connector (sensorless drive), USART2 stays free for Motor Pilot.
+   One ASCII line every TELEM_PERIOD_TICKS, e.g.:
+     RPM=5010 IPH=1836mA IBUS=250mA VBUS=12V
+   IBUS is estimated from electrical power / bus voltage (no bus shunt). */
+#define TELEM_PERIOD_TICKS   100U  /* message period in medium-frequency ticks (~100 ms) */
+#define TELEM_BAUDRATE       115200U
+
+static char telem_buf[64];
+static uint8_t telem_len = 0U;
+static uint8_t telem_pos = 0U;
+
+/* s16A (0-to-peak) to ampere, from the MC_GetPhaseCurrentAmplitudeMotor1() doc:
+   I[A] = s16A * Vdd / (65536 * Rshunt * Aop) */
+static const float S16A_TO_AMP = 3.3f / (65536.0f * RSHUNT * AMPLIFICATION_GAIN);
+
+static void telem_uart_init(void)
+{
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+
+  LL_GPIO_SetPinSpeed(GPIOB, LL_GPIO_PIN_6, LL_GPIO_SPEED_FREQ_HIGH);
+  LL_GPIO_SetPinOutputType(GPIOB, LL_GPIO_PIN_6, LL_GPIO_OUTPUT_PUSHPULL);
+  LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_6, LL_GPIO_PULL_UP);
+  LL_GPIO_SetAFPin_0_7(GPIOB, LL_GPIO_PIN_6, LL_GPIO_AF_7);
+  LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_6, LL_GPIO_MODE_ALTERNATE);
+
+  /* USART1 kernel clock is PCLK2 = SystemCoreClock (APB2 prescaler is DIV1) */
+  LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX);
+  LL_USART_SetBaudRate(USART1, SystemCoreClock, LL_USART_PRESCALER_DIV1,
+                       LL_USART_OVERSAMPLING_16, TELEM_BAUDRATE);
+  LL_USART_EnableFIFO(USART1);
+  LL_USART_Enable(USART1);
+}
 
 /* Power-on "beep-beep": drives the motor windings as a speaker, same technique
    as the MCSDK ESC beep feature (esc.c). Played once while the drive is IDLE,
@@ -100,6 +137,7 @@ __weak void MC_APP_BootHook(void)
   /* esc_boot(&ESC_M1); */ /* ESC PWM input bypassed: control via Motor Pilot */
 /* USER CODE BEGIN BootHook */
   (void)RCM_RegisterRegConv(&PotRegConv);
+  telem_uart_init();
 /* USER CODE END BootHook */
 }
 
@@ -212,6 +250,42 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           pot_last_rpm = rpm;
           MC_ProgramSpeedRampMotor1((int16_t)((rpm * SPEED_UNIT) / U_RPM), 250U);
+        }
+      }
+    }
+  }
+  /* Telemetry: non-blocking sender. Every tick the pending message is drained
+     into the USART1 TX FIFO; a new line is built every TELEM_PERIOD_TICKS. */
+  {
+    static uint16_t telem_tick = 0U;
+
+    while ((telem_pos < telem_len) && (0U != LL_USART_IsActiveFlag_TXE_TXFNF(USART1)))
+    {
+      LL_USART_TransmitData8(USART1, (uint8_t)telem_buf[telem_pos]);
+      telem_pos++;
+    }
+
+    telem_tick++;
+    if (telem_tick >= TELEM_PERIOD_TICKS)
+    {
+      telem_tick = 0U;
+      if (telem_pos >= telem_len) /* previous line fully queued */
+      {
+        int32_t rpm = ((int32_t)MC_GetMecSpeedAverageMotor1() * U_RPM) / SPEED_UNIT;
+        int32_t iph_mA = (int32_t)((float)MC_GetPhaseCurrentAmplitudeMotor1()
+                                   * S16A_TO_AMP * 1000.0f);
+        uint16_t vbus_V = VBS_GetAvBusVoltage_V(&BusVoltageSensor_M1._Super);
+        int32_t power_mW = (int32_t)(MC_GetAveragePowerMotor1_F() * 1000.0f);
+        int32_t ibus_mA = (vbus_V > 0U) ? (power_mW / (int32_t)vbus_V) : 0;
+
+        int n = snprintf(telem_buf, sizeof(telem_buf),
+                         "RPM=%d IPH=%dmA IBUS=%dmA VBUS=%uV\r\n",
+                         (int)rpm, (int)iph_mA, (int)ibus_mA, (unsigned int)vbus_V);
+        if (n > 0)
+        {
+          telem_len = ((size_t)n < sizeof(telem_buf)) ? (uint8_t)n
+                                                      : (uint8_t)(sizeof(telem_buf) - 1U);
+          telem_pos = 0U;
         }
       }
     }
