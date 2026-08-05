@@ -68,6 +68,15 @@ python tools/telemetry_monitor.py
 다른 터미널 프로그램이 같은 포트를 열고 있으면 연결에 실패하므로 먼저
 닫아야 합니다. (요구 사항: Python 3 + pyserial, tkinter는 기본 포함)
 
+Python 없이 쓸 수 있는 단일 실행파일은 PyInstaller로 빌드합니다:
+
+```
+pip install pyinstaller
+python -m PyInstaller tools/TelemetryMonitor.spec
+```
+
+결과물은 `tools/dist/TelemetryMonitor.exe` 로 생성됩니다 (git에는 미포함).
+
 원본 예제의 RC PWM 입력 처리(`esc_boot` / `esc_pwm_control`)는 주석 처리되어
 사용하지 않습니다. 주요 튜닝 파라미터는 `mc_app_hooks.c` 상단의
 `POT_SPEED_MIN_RPM` / `POT_SPEED_MAX_RPM`과 `Inc/drive_parameters.h`에 있습니다.
