@@ -54,6 +54,20 @@ USART2를 텔레메트리가 점유하므로 Motor Pilot(ASPEP)은 비활성화 
 송신은 Medium Frequency Task에서 TX FIFO를 논블로킹으로 채우는 방식이라
 모터 제어에 영향을 주지 않습니다.
 
+### 모니터 UI (`tools/telemetry_monitor.py`)
+
+RPM·상전류·버스전류·버스전압을 실시간 숫자 + 그래프(최근 60초)로 보여주는
+PC용 시리얼 모니터입니다.
+
+```
+pip install pyserial
+python tools/telemetry_monitor.py
+```
+
+실행 후 ST-LINK 가상 COM 포트가 자동 선택되며 [연결]을 누르면 됩니다.
+다른 터미널 프로그램이 같은 포트를 열고 있으면 연결에 실패하므로 먼저
+닫아야 합니다. (요구 사항: Python 3 + pyserial, tkinter는 기본 포함)
+
 원본 예제의 RC PWM 입력 처리(`esc_boot` / `esc_pwm_control`)는 주석 처리되어
 사용하지 않습니다. 주요 튜닝 파라미터는 `mc_app_hooks.c` 상단의
 `POT_SPEED_MIN_RPM` / `POT_SPEED_MAX_RPM`과 `Inc/drive_parameters.h`에 있습니다.
