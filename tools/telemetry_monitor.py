@@ -73,18 +73,20 @@ class StripChart(tk.Canvas):
     """RPM(우축, 항상 표시)과 선택한 비교 신호(좌축) 두 개를 겹쳐 그리는 차트.
 
     상단 범례에서 RPM 외 신호 하나를 클릭해 선택하면 좌측 Y축에 그 신호의
-    눈금이 표시된다. 토크/브레이크력은 0 기준선(점선) 중심의 ±대칭 스케일로,
-    구동(양수)은 녹색, 제동(음수)은 빨간색으로 구간별 색을 바꿔 그린다.
+    눈금이 표시된다. 토크는 0 기준선(점선) 중심의 ±대칭 스케일로 구동(양수)은
+    녹색, 제동(음수)은 빨간색. 브레이크력은 0~BRK_SCALE_MAX(20gf) 고정 범위에
+    크기(|F|)로 그리고 제동 구간만 빨간색으로 구분한다.
     """
 
     PAD_L, PAD_R, PAD_T, PAD_B = 62, 62, 30, 22
     DRIVE_COLOR, BRAKE_COLOR = "#2ca02c", "#d62728"
     RPM_COLOR = "#1f77b4"
+    BRK_SCALE_MAX = 20  # 브레이크력 고정 표시 범위 0~20 gf (|F| 기준, 적색=제동)
     # key, 라벨, 색, 단위, 부호(±대칭) 여부, 최소 스케일
     SERIES = (
         ("rpm",  "RPM",      "#1f77b4", "rpm",  False, 1000),
         ("trq",  "토크",      "#2ca02c", "mN·m", True,  10),
-        ("brk",  "브레이크력", "#9467bd", "gf",   True,  50),
+        ("brk",  "브레이크력", "#9467bd", "gf",   False, 20),
         ("iph",  "상전류",    "#ff7f0e", "A",    False, 1),
         ("ibus", "버스전류",  "#8c564b", "A",    False, 1),
         ("vbus", "버스전압",  "#7f7f7f", "V",    False, 15),
@@ -134,9 +136,12 @@ class StripChart(tk.Canvas):
         if x1 <= x0 or y1 <= y0:
             return
 
-        # 신호별 자동 스케일 계산
+        # 신호별 스케일 계산 (브레이크력은 0~BRK_SCALE_MAX 고정)
         scales = {}
         for key, _label, _color, _unit, signed, min_scale in self.SERIES:
+            if key == "brk":
+                scales[key] = self.BRK_SCALE_MAX
+                continue
             vals = [abs(s[key]) for s in self.samples if s.get(key) is not None]
             scales[key] = self._nice_max(max(vals, default=0), min_scale)
 
@@ -148,7 +153,10 @@ class StripChart(tk.Canvas):
         lx = x0 + 4
         for key, label, color, unit, _signed, _min in self.SERIES:
             on = (key == "rpm") or (key == sel)
-            text = f"■ {label} (≤{scales[key]:g}{unit})"
+            if key == "brk":
+                text = f"■ {label} (0~{scales[key]:g}{unit})"
+            else:
+                text = f"■ {label} (≤{scales[key]:g}{unit})"
             if key == "rpm":
                 text += " [우축]"
             elif key == sel:
@@ -204,6 +212,8 @@ class StripChart(tk.Canvas):
                 v = s[key]
                 if signed:
                     y = y_mid - half * max(min(v / vmax, 1.0), -1.0)
+                elif key == "brk":  # 크기를 0~고정범위로, 부호는 색으로 구분
+                    y = y1 - (y1 - y0) * min(abs(v) / vmax, 1.0)
                 else:
                     y = y1 - (y1 - y0) * min(max(v, 0) / vmax, 1.0)
                 pts.append((to_x(s["t"]), y, v))
@@ -212,6 +222,10 @@ class StripChart(tk.Canvas):
             if key == "trq":  # 토크: 부호에 따라 녹/적 구간 분리
                 for (xa, ya, va), (xb, yb, vb) in zip(pts, pts[1:]):
                     seg = self.BRAKE_COLOR if (va + vb) / 2 < 0 else self.DRIVE_COLOR
+                    self.create_line(xa, ya, xb, yb, fill=seg, width=2)
+            elif key == "brk":  # 브레이크력: 제동(음수)은 적색, 구동은 보라색
+                for (xa, ya, va), (xb, yb, vb) in zip(pts, pts[1:]):
+                    seg = self.BRAKE_COLOR if (va + vb) / 2 < 0 else color
                     self.create_line(xa, ya, xb, yb, fill=seg, width=2)
             else:
                 self.create_line(*[c for p in pts for c in (p[0], p[1])],

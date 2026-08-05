@@ -11,6 +11,8 @@ import telemetry_monitor as tm
 
 def main():
     app = tm.MonitorApp()
+    app.radius_var.set("100")       # 브레이크력이 0~20gf 범위에 들어오도록
+    app.chart.selected = "brk"      # 좌축을 브레이크력으로 두고 검증
     t0 = time.time()
     n = [0]
 
