@@ -22,6 +22,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include <stdio.h>
+#include <string.h>
 #include "mc_type.h"
 #include "mc_app_hooks.h"
 #include "mc_config.h"
@@ -57,6 +58,149 @@ static RegConv_t PotRegConv =
 static char telem_buf[80];
 static uint8_t telem_len = 0U;
 static uint8_t telem_pos = 0U;
+
+/* Casting simulation — the PC UI sends one-line commands on the same USART2:
+     CAST1 : soft throw  (low peak speed, quick run-down)
+     CAST2 : hard throw  (max peak speed, long run-down)
+     SPD n : remote speed set-point (custom profile streaming from the PC;
+             falls back to the dial if no SPD arrives for 1 s)
+     DIAL  : leave remote/cast mode, dial control resumes immediately
+     STOP  : stop the motor        START : restart at the default speed
+   A cast ramps the spool to the profile peak, dwells briefly, then decays the
+   speed command exponentially like a real cast spool run-down. The reel brake
+   drag then shows up as extra motor torque (P/omega) across the whole speed
+   sweep. Outside a cast ("normal mode") the PB12 dial keeps controlling the
+   speed; the dial is ignored only while a cast is in progress. */
+typedef struct
+{
+  uint16_t peak_rpm;
+  uint16_t ramp_ms;   /* spin-up ramp to the peak */
+  uint16_t hold_ms;   /* dwell at the peak before the decay */
+  uint16_t decay_k;   /* speed factor per 100 ms step, x1024 (927 = tau 1 s, 974 = tau 2 s) */
+} CastProfile_t;
+
+static const CastProfile_t CAST_PROFILES[2] =
+{
+  { 4000U, 500U, 300U, 927U },  /* CAST1: soft throw, ~1.2 s run-down */
+  { 9500U, 500U, 300U, 974U },  /* CAST2: hard throw, ~4 s run-down */
+};
+#define CAST_END_RPM         1200  /* profile ends here, dial control resumes */
+#define CAST_DECAY_STEP_MS   100U
+#define SPD_TIMEOUT_TICKS    1000U /* remote (SPD) mode watchdog: 1 s without a
+                                      new set-point returns control to the dial */
+
+static uint8_t cast_pending = 0U;  /* 1/2 = requested mode, 0 = none */
+static uint8_t cast_state = 0U;    /* 0 idle, 1 ramp+hold, 2 decay */
+static uint8_t cast_mode = 0U;
+static uint16_t cast_tick = 0U;
+static int32_t cast_rpm = 0;
+static uint16_t spd_timeout = 0U;  /* >0 while the PC streams SPD set-points */
+static int32_t pot_last_rpm = 0;   /* file scope so a finished cast can force a dial re-apply */
+
+static void cast_rx_poll(void)
+{
+  static char rx_buf[12];
+  static uint8_t rx_len = 0U;
+
+  if (0U != LL_USART_IsActiveFlag_ORE(USART2))
+  {
+    LL_USART_ClearFlag_ORE(USART2);
+  }
+  while (0U != LL_USART_IsActiveFlag_RXNE_RXFNE(USART2))
+  {
+    char c = (char)LL_USART_ReceiveData8(USART2);
+    if (('\r' == c) || ('\n' == c))
+    {
+      rx_buf[rx_len] = '\0';
+      rx_len = 0U;
+      if (0 == strcmp(rx_buf, "CAST1"))
+      {
+        cast_pending = 1U;
+      }
+      else if (0 == strcmp(rx_buf, "CAST2"))
+      {
+        cast_pending = 2U;
+      }
+      else if (0 == strncmp(rx_buf, "SPD ", 4))
+      {
+        /* Custom profile streaming: apply the requested rpm and re-arm the
+           watchdog. Overrides a running cast; starts the motor if stopped. */
+        int32_t rpm = 0;
+        const char *s = &rx_buf[4];
+        bool ok = ('\0' != *s);
+
+        while (ok && ('\0' != *s))
+        {
+          if ((*s >= '0') && (*s <= '9'))
+          {
+            rpm = (rpm * 10) + (int32_t)(*s - '0');
+            s++;
+          }
+          else
+          {
+            ok = false;
+          }
+        }
+        if (ok)
+        {
+          if (rpm < POT_SPEED_MIN_RPM) { rpm = POT_SPEED_MIN_RPM; }
+          if (rpm > POT_SPEED_MAX_RPM) { rpm = POT_SPEED_MAX_RPM; }
+          cast_pending = 0U;
+          cast_state = 0U;
+          spd_timeout = SPD_TIMEOUT_TICKS;
+          if (RUN == MC_GetSTMStateMotor1())
+          {
+            MC_ProgramSpeedRampMotor1((int16_t)((rpm * SPEED_UNIT) / U_RPM), 100U);
+          }
+          else if (IDLE == MC_GetSTMStateMotor1())
+          {
+            MC_ProgramSpeedRampMotor1((int16_t)((rpm * SPEED_UNIT) / U_RPM), 1000U);
+            (void)MC_StartMotor1();
+          }
+          else
+          {
+            /* transitioning: next SPD line will land in RUN or IDLE */
+          }
+        }
+      }
+      else if (0 == strcmp(rx_buf, "DIAL"))
+      {
+        cast_pending = 0U;
+        cast_state = 0U;
+        spd_timeout = 0U;
+        pot_last_rpm = 0; /* dial speed re-applies on the next pot update */
+      }
+      else if (0 == strcmp(rx_buf, "STOP"))
+      {
+        cast_pending = 0U;
+        cast_state = 0U;
+        spd_timeout = 0U;
+        (void)MC_StopMotor1();
+      }
+      else if (0 == strcmp(rx_buf, "START"))
+      {
+        if (IDLE == MC_GetSTMStateMotor1())
+        {
+          MC_ProgramSpeedRampMotor1((int16_t)DEFAULT_TARGET_SPEED_UNIT, 2000U);
+          (void)MC_StartMotor1();
+        }
+      }
+      else
+      {
+        /* unknown command: ignore */
+      }
+    }
+    else if (rx_len < (uint8_t)(sizeof(rx_buf) - 1U))
+    {
+      rx_buf[rx_len] = c;
+      rx_len++;
+    }
+    else
+    {
+      rx_len = 0U; /* overlong line: discard */
+    }
+  }
+}
 
 /* s16A (0-to-peak) to ampere, from the MC_GetPhaseCurrentAmplitudeMotor1() doc:
    I[A] = s16A * Vdd / (65536 * Rshunt * Aop) */
@@ -216,13 +360,95 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
     }
   }
 
+  /* Casting simulation: parse UART commands and run the cast profile.
+     While a cast is active the dial (potentiometer) is ignored. */
+  {
+    cast_rx_poll();
+
+    /* Remote (SPD) mode watchdog: if the PC stream stops, return to the dial */
+    if (0U != spd_timeout)
+    {
+      spd_timeout--;
+      if (0U == spd_timeout)
+      {
+        pot_last_rpm = 0;
+      }
+    }
+
+    MCI_State_t state = MC_GetSTMStateMotor1();
+    if ((0U != cast_state) && (RUN != state))
+    {
+      cast_state = 0U; /* stop/fault aborts the cast */
+    }
+
+    if (0U != cast_pending)
+    {
+      if (RUN == state)
+      {
+        const CastProfile_t *p = &CAST_PROFILES[cast_pending - 1U];
+        cast_mode = cast_pending;
+        cast_pending = 0U;
+        spd_timeout = 0U; /* a built-in cast overrides remote mode */
+        cast_rpm = (int32_t)p->peak_rpm;
+        cast_state = 1U;
+        cast_tick = 0U;
+        MC_ProgramSpeedRampMotor1((int16_t)((cast_rpm * SPEED_UNIT) / U_RPM),
+                                  p->ramp_ms);
+      }
+      else if (IDLE == state)
+      {
+        /* motor stopped: spin it up first, the cast begins once RUN is reached */
+        MC_ProgramSpeedRampMotor1((int16_t)(((int32_t)CAST_END_RPM * SPEED_UNIT) / U_RPM),
+                                  1000U);
+        (void)MC_StartMotor1();
+      }
+      else
+      {
+        /* start/stop transition in progress: retry next tick */
+      }
+    }
+    else if (1U == cast_state)
+    {
+      const CastProfile_t *p = &CAST_PROFILES[cast_mode - 1U];
+      cast_tick++;
+      if (cast_tick >= (uint16_t)(p->ramp_ms + p->hold_ms))
+      {
+        cast_state = 2U;
+        cast_tick = 0U;
+      }
+    }
+    else if (2U == cast_state)
+    {
+      cast_tick++;
+      if (cast_tick >= CAST_DECAY_STEP_MS)
+      {
+        cast_tick = 0U;
+        const CastProfile_t *p = &CAST_PROFILES[cast_mode - 1U];
+        cast_rpm = (cast_rpm * (int32_t)p->decay_k) >> 10;
+        if (cast_rpm <= CAST_END_RPM)
+        {
+          cast_state = 0U;
+          pot_last_rpm = 0; /* cast finished: force the dial speed to re-apply */
+        }
+        else
+        {
+          MC_ProgramSpeedRampMotor1((int16_t)((cast_rpm * SPEED_UNIT) / U_RPM),
+                                    CAST_DECAY_STEP_MS);
+        }
+      }
+    }
+    else
+    {
+      /* normal mode: dial control below */
+    }
+  }
+
   /* Potentiometer speed control: filtered PB12 reading mapped onto
      POT_SPEED_MIN_RPM..POT_SPEED_MAX_RPM, applied while the motor runs. */
   {
     static uint16_t pot_tick = 0U;
     static uint32_t pot_filt = 0U;    /* IIR-filtered raw ADC value (u16 range) */
     static bool pot_filt_init = false;
-    static int32_t pot_last_rpm = 0;
 
     pot_tick++;
     if (pot_tick >= POT_UPDATE_TICKS)
@@ -239,7 +465,8 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         pot_filt = ((pot_filt * 7U) + raw) >> 3;
       }
 
-      if (RUN == MC_GetSTMStateMotor1())
+      if ((RUN == MC_GetSTMStateMotor1()) && (0U == cast_state)
+          && (0U == cast_pending) && (0U == spd_timeout))
       {
         int32_t rpm = POT_SPEED_MIN_RPM
                     + (int32_t)((pot_filt * (uint32_t)(POT_SPEED_MAX_RPM - POT_SPEED_MIN_RPM)) >> 16);

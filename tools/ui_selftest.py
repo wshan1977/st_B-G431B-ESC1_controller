@@ -13,7 +13,7 @@ def main():
     app = tm.MonitorApp()
     app.attributes("-topmost", True)  # 다른 창에 가려 스크린샷이 오염되지 않게
     app.radius_var.set("100")       # 브레이크력이 0~20gf 범위에 들어오도록
-    app.chart.selected = "brk"      # 좌축을 브레이크력으로 두고 검증
+    app.chart.selected = "ibus"     # 좌축 버스전류: 하강→상승 빨간 점 검증
     t0 = time.time()
     n = [0]
 
@@ -38,6 +38,22 @@ def main():
         x, y = app.winfo_rootx(), app.winfo_rooty()
         w, h = app.winfo_width(), app.winfo_height()
         ImageGrab.grab((x, y, x + w, y + h)).save("ui_selftest.png")
+        # 프로파일 에디터 검증: 열고 점 추가/삭제 후 스크린샷
+        app._open_editor()
+        ed = app.editor
+        ed.attributes("-topmost", True)
+        ed.update_idletasks()
+        ed.points.append((7.5, 5000))
+        ed.points.sort()
+        ed.redraw()
+        ed.update_idletasks()
+        app.after(300, lambda: shoot_editor(ed))
+
+    def shoot_editor(ed):
+        ed.update_idletasks()
+        x, y = ed.winfo_rootx(), ed.winfo_rooty()
+        w, h = ed.winfo_width(), ed.winfo_height()
+        ImageGrab.grab((x, y, x + w, y + h)).save("ui_selftest_editor.png")
         app.destroy()
 
     app.after(200, inject)
